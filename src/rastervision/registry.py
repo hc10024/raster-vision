@@ -1,4 +1,6 @@
 import rastervision as rv
+from rastervision.rv_config import RVConfig
+from rastervision.plugin import PluginRegistry
 from rastervision.data.raster_source.default import (
     DefaultGeoTiffSourceProvider, DefaultImageSourceProvider)
 from rastervision.data.label_source.default import (
@@ -22,6 +24,9 @@ class Registry:
     """
 
     def __init__(self):
+        self._rv_config = None
+        self._plugin_registry = None
+
         self._internal_config_builders = {
             # Tasks
             (rv.TASK, rv.OBJECT_DETECTION):
@@ -107,13 +112,47 @@ class Registry:
             rv.AWS_BATCH: rv.runner.LocalExperimentRunner
         }
 
+    def initialize_config(self,
+                          profile=None,
+                          rv_home=None,
+                          config_overrides=None):
+        self._rv_config = RVConfig(
+            profile=profile,
+            rv_home=rv_home,
+            config_overrides=config_overrides)
+        # Reset the plugins in case this is a re-initialization,
+        self._plugin_registry = None
+
+    def _get_rv_config(self):
+        """Returns the application configuration"""
+        if self._rv_config is None:
+            self.initialize_config()
+        return self._rv_config
+
+    def _ensure_plugins_loaded(self):
+        if not self._plugin_registry:
+            self._load_plugins()
+
+    def _get_plugin_registry(self):
+        self._ensure_plugins_loaded()
+        return self._plugin_registry
+
+    def _load_plugins(self):
+        rv_config = self._get_rv_config()
+        plugin_config = rv_config.get_subconfig('PLUGINS')
+        self._plugin_registry = PluginRegistry(plugin_config,
+                                               rv_config.rv_home)
+
     def get_config_builder(self, group, key):
         internal_builder = self._internal_config_builders.get((group, key))
         if internal_builder:
             return internal_builder
         else:
-            # TODO: Search plugins
-            pass
+            self._ensure_plugins_loaded()
+            plugin_builder = self._plugin_registry.config_builders.get((group,
+                                                                        key))
+            if plugin_builder:
+                return plugin_builder
 
         raise RegistryError('Unknown type {} for {} '.format(key, group))
 
@@ -121,11 +160,13 @@ class Registry:
         """
         Gets the DefaultRasterSourceProvider for a given input string.
         """
-        for provider in self._internal_default_raster_sources:
+        self._ensure_plugins_loaded()
+        providers = (self._plugin_registry.default_raster_sources +
+                     self._internal_default_raster_sources)
+
+        for provider in providers:
             if provider.handles(s):
                 return provider
-
-        # TODO: Search plugins
 
         raise RegistryError(
             'No DefaultRasterSourceProvider found for {}'.format(s))
@@ -134,11 +175,13 @@ class Registry:
         """
         Gets the DefaultRasterSourceProvider for a given input string.
         """
-        for provider in self._internal_default_label_sources:
+        self._ensure_plugins_loaded()
+        providers = (self._plugin_registry.default_label_sources +
+                     self._internal_default_label_sources)
+
+        for provider in providers:
             if provider.handles(task_type, s):
                 return provider
-
-        # TODO: Search plugins
 
         raise RegistryError('No DefaultLabelSourceProvider '
                             'found for {} and task type {}'.format(
@@ -149,9 +192,11 @@ class Registry:
         Gets the DefaultRasterSourceProvider for a given input string.
         """
 
-        # TODO: Search plugin before internal
+        self._ensure_plugins_loaded()
+        providers = (self._plugin_registry.default_label_stores +
+                     self._internal_default_label_stores)
 
-        for provider in self._internal_default_label_stores:
+        for provider in providers:
             if s:
                 if provider.handles(task_type, s):
                     return provider
@@ -172,9 +217,11 @@ class Registry:
         Gets the DefaultEvaluatorProvider for a given task
         """
 
-        # TODO: Search plugin before internal
+        self._ensure_plugins_loaded()
+        providers = (self._plugin_registry.default_evaluators +
+                     self._internal_default_evaluators)
 
-        for provider in self._internal_default_evaluators:
+        for provider in providers:
             if provider.is_default_for(task_type):
                 return provider
 
@@ -189,10 +236,15 @@ class Registry:
         return builder
 
     def get_experiment_runner(self, runner_type):
-        runner = self.experiment_runners.get(runner_type)
-        if not runner:
-            # TODO: Search plugins
-            raise RegistryError(
-                'No experiment runner for type {}'.format(runner_type))
+        internal_runner = self.experiment_runners.get(runner_type)
+        if internal_runner:
+            return internal_runner()
+        else:
+            self._ensure_plugins_loaded()
+            plugin_runner = self._plugin_registry.experiment_runners.get(
+                runner_type)
+            if plugin_runner:
+                return plugin_runner()
 
-        return runner()
+        raise RegistryError(
+            'No experiment runner for type {}'.format(runner_type))
